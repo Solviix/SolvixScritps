@@ -1,0 +1,321 @@
+-- [[ SOLVIX TACTICAL SUITE - LINORIA UI (PERSISTENTE) ]] --
+
+local repo = "https://raw.githubusercontent.com/violin-suzutsuki/LinoriaLib/main/"
+local Library = loadstring(game:HttpGet(repo .. "Library.lua"))()
+local ThemeManager = loadstring(game:HttpGet(repo .. "addons/ThemeManager.lua"))()
+
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
+
+-- ==========================================
+-- ESTRUCTURA DE LA INTERFAZ
+-- ==========================================
+local Window = Library:CreateWindow({
+    Title = "Solvix | Tactical Suite",
+    Center = true,
+    AutoShow = true,
+    TabPadding = 8,
+    MenuFadeTime = 0.2
+})
+
+local Tabs = {
+    Aimbot = Window:AddTab("Aimbot"),
+    Visuals = Window:AddTab("Visuals"),
+    Settings = Window:AddTab("Settings"),
+}
+
+-- 1. SECCIÓN: AIMBOT DE CÁMARA
+local CamAimGroup = Tabs.Aimbot:AddLeftGroupbox("Aimbot (Cámara)")
+CamAimGroup:AddToggle("AimbotEnabled", { Text = "Activar Aimbot Cam", Default = false })
+CamAimGroup:AddSlider("AimSpeed", { Text = "Velocidad (1 = Ultra Rápido)", Default = 5, Min = 1, Max = 30, Rounding = 0 })
+
+-- 2. SECCIÓN: SILENT AIM
+local SilentAimGroup = Tabs.Aimbot:AddRightGroupbox("Silent Aim")
+SilentAimGroup:AddToggle("SilentAimEnabled", { Text = "Activar Silent Aim", Default = false })
+
+-- 3. SECCIÓN: CONFIGURACIÓN GENERAL Y FOV (COMPARTIDO)
+local GeneralAimGroup = Tabs.Aimbot:AddLeftGroupbox("Configuración General & FOV")
+GeneralAimGroup:AddToggle("TeamCheck", { Text = "Team Check", Default = true })
+GeneralAimGroup:AddToggle("WallCheck", { Text = "Wall Check", Default = true })
+GeneralAimGroup:AddDropdown("TargetPart", { Values = { "Head", "HumanoidRootPart" }, Default = 1, Text = "Parte Objetivo" })
+
+GeneralAimGroup:AddLabel("--- Configuración de FOV ---")
+GeneralAimGroup:AddToggle("ShowFOV", { Text = "Mostrar FOV", Default = true })
+GeneralAimGroup:AddSlider("FOVRadius", { Text = "Radio del FOV", Default = 100, Min = 20, Max = 500, Rounding = 0 })
+
+-- 4. SECCIÓN: VISUALS
+local VisGroupBox = Tabs.Visuals:AddLeftGroupbox("ESP Config")
+VisGroupBox:AddToggle("ESPEnabled", { Text = "Activar ESP", Default = false })
+VisGroupBox:AddToggle("ESPTeamCheck", { Text = "Team Check (Visuals)", Default = true })
+VisGroupBox:AddToggle("BoxESP", { Text = "Box ESP", Default = false })
+VisGroupBox:AddToggle("SkeletonESP", { Text = "Skeleton ESP", Default = false })
+
+VisGroupBox:AddLabel("Color Box"):AddColorPicker("BoxColor", { Default = Color3.fromRGB(255, 50, 50) })
+VisGroupBox:AddLabel("Color Esqueleto"):AddColorPicker("SkeletonColor", { Default = Color3.fromRGB(255, 255, 255) })
+
+-- ==========================================
+-- DIBUJO Y UTILIDADES
+-- ==========================================
+local FOVCircle = Drawing.new("Circle")
+FOVCircle.Thickness = 1.5
+FOVCircle.Color = Color3.fromRGB(255, 255, 255)
+FOVCircle.Filled = false
+FOVCircle.Transparency = 1
+FOVCircle.Visible = false
+
+local ESPCache = {}
+
+local function createESPObjects()
+    local objects = { Box = Drawing.new("Square"), Skeleton = {} }
+    objects.Box.Thickness = 1.5
+    objects.Box.Filled = false
+    objects.Box.Visible = false
+
+    for i = 1, 14 do
+        local line = Drawing.new("Line")
+        line.Thickness = 1.5
+        line.Visible = false
+        table.insert(objects.Skeleton, line)
+    end
+    return objects
+end
+
+local function removeESPObjects(objects)
+    if objects.Box then objects.Box:Remove() end
+    for _, line in ipairs(objects.Skeleton) do line:Remove() end
+end
+
+local function isVisible(targetPart, targetCharacter)
+    local origin = Camera.CFrame.Position
+    local destination = targetPart.Position
+    local direction = destination - origin
+
+    local raycastParams = RaycastParams.new()
+    raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+
+    local ignoreList = { LocalPlayer.Character, Camera }
+    if LocalPlayer.Character then
+        for _, child in pairs(LocalPlayer.Character:GetChildren()) do
+            if child:IsA("Tool") then table.insert(ignoreList, child) end
+        end
+    end
+    raycastParams.FilterDescendantsInstances = ignoreList
+    raycastParams.IgnoreWater = true
+
+    local success, result = pcall(function()
+        return Workspace:Raycast(origin, direction, raycastParams)
+    end)
+
+    if success and result then
+        local hitInstance = result.Instance
+        if hitInstance:IsDescendantOf(targetCharacter) then return true end
+        return false
+    end
+    return true
+end
+
+-- Selección de objetivo compartida por Aimbot y Silent Aim
+local function getClosestTarget()
+    local closestTarget = nil
+    local shortestDistance = Options.FOVRadius.Value
+    local mousePos = UserInputService:GetMouseLocation()
+
+    for _, player in pairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character then
+            if Toggles.TeamCheck.Value and player.Team == LocalPlayer.Team then continue end
+
+            local character = player.Character
+            local humanoid = character:FindFirstChildOfClass("Humanoid")
+            local targetPart = character:FindFirstChild(Options.TargetPart.Value)
+
+            if humanoid and targetPart and humanoid.Health > 0 then
+                local screenPos, onScreen = Camera:WorldToViewportPoint(targetPart.Position)
+
+                if onScreen then
+                    local screenVector = Vector2.new(screenPos.X, screenPos.Y)
+                    local distance = (screenVector - mousePos).Magnitude
+
+                    if distance < shortestDistance then
+                        if Toggles.WallCheck.Value and not isVisible(targetPart, character) then
+                            continue
+                        end
+                        shortestDistance = distance
+                        closestTarget = targetPart
+                    end
+                end
+            end
+        end
+    end
+    return closestTarget
+end
+
+-- ==========================================
+-- HOOK DE BALAS CON RECONEXIÓN AUTOMÁTICA
+-- ==========================================
+local hookedTables = {}
+
+local function applySilentAimHook()
+    for _, obj in pairs(getgc(true)) do
+        if typeof(obj) == "table" and rawget(obj, "GetFullRayCastResult") and not hookedTables[obj] then
+            hookedTables[obj] = true
+            local originalFunc = obj.GetFullRayCastResult
+
+            obj.GetFullRayCastResult = function(a1, a2, a3, a4, a5, a6, a7, a8)
+                if Toggles.SilentAimEnabled.Value then
+                    local target = getClosestTarget()
+                    if target then
+                        -- Redirige la trayectoria del disparo hacia el objetivo
+                        a2 = (target.Position - a1).Unit
+                    end
+                end
+                return originalFunc(a1, a2, a3, a4, a5, a6, a7, a8)
+            end
+        end
+    end
+end
+
+-- Re-escaneo continuo en segundo plano para mantener el hook activo tras el respawn
+task.spawn(function()
+    while task.wait(1) do
+        pcall(applySilentAimHook)
+    end
+end)
+
+-- Huesos para Skeleton ESP
+local R15Bones = {
+    {"Head", "UpperTorso"}, {"UpperTorso", "LowerTorso"},
+    {"UpperTorso", "LeftUpperArm"}, {"LeftUpperArm", "LeftLowerArm"}, {"LeftLowerArm", "LeftHand"},
+    {"UpperTorso", "RightUpperArm"}, {"RightUpperArm", "RightLowerArm"}, {"RightLowerArm", "RightHand"},
+    {"LowerTorso", "LeftUpperLeg"}, {"LeftUpperLeg", "LeftLowerLeg"}, {"LeftLowerLeg", "LeftFoot"},
+    {"LowerTorso", "RightUpperLeg"}, {"RightUpperLeg", "RightLowerLeg"}, {"RightLowerLeg", "RightFoot"}
+}
+
+local R6Bones = {
+    {"Head", "Torso"},
+    {"Torso", "Left Arm"}, {"Torso", "Right Arm"},
+    {"Torso", "Left Leg"}, {"Torso", "Right Leg"}
+}
+
+-- ==========================================
+-- BUCLE PRINCIPAL (RENDERSTEPPED)
+-- ==========================================
+RunService.RenderStepped:Connect(function()
+    -- Círculo de FOV
+    if Toggles.ShowFOV.Value and (Toggles.AimbotEnabled.Value or Toggles.SilentAimEnabled.Value) then
+        FOVCircle.Position = UserInputService:GetMouseLocation()
+        FOVCircle.Radius = Options.FOVRadius.Value
+        FOVCircle.Visible = true
+    else
+        FOVCircle.Visible = false
+    end
+
+    -- Lógica del Aimbot de Cámara
+    if Toggles.AimbotEnabled.Value and UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then
+        local target = getClosestTarget()
+        if target then
+            local targetPos = Camera:WorldToViewportPoint(target.Position)
+            local mousePos = UserInputService:GetMouseLocation()
+
+            local deltaX = targetPos.X - mousePos.X
+            local deltaY = targetPos.Y - mousePos.Y
+
+            local smoothness = math.clamp(Options.AimSpeed.Value, 1, 30)
+            local step = (1 / smoothness) * 2.5
+
+            local moveX = deltaX * math.min(step, 1)
+            local moveY = deltaY * math.min(step, 1)
+
+            if math.abs(moveX) > 0 and math.abs(moveX) < 1 then moveX = (moveX > 0 and 1 or -1) end
+            if math.abs(moveY) > 0 and math.abs(moveY) < 1 then moveY = (moveY > 0 and 1 or -1) end
+
+            mousemoverel(moveX, moveY)
+        end
+    end
+
+    -- Visuals / ESP
+    for _, player in pairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            if not ESPCache[player] then ESPCache[player] = createESPObjects() end
+            local esp = ESPCache[player]
+            local character = player.Character
+            local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+            local hrp = character and character:FindFirstChild("HumanoidRootPart")
+
+            local isAlive = character and humanoid and hrp and humanoid.Health > 0
+            local isEnemy = not Toggles.ESPTeamCheck.Value or (player.Team ~= LocalPlayer.Team)
+
+            if Toggles.ESPEnabled.Value and isAlive and isEnemy then
+                local hrpPos, onScreen = Camera:WorldToViewportPoint(hrp.Position)
+
+                if onScreen then
+                    if Toggles.BoxESP.Value then
+                        local head = character:FindFirstChild("Head")
+                        if head then
+                            local headPos = Camera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.5, 0))
+                            local legPos = Camera:WorldToViewportPoint(hrp.Position - Vector3.new(0, 3, 0))
+                            local height = math.abs(headPos.Y - legPos.Y)
+                            local width = height / 1.8
+
+                            esp.Box.Size = Vector2.new(width, height)
+                            esp.Box.Position = Vector2.new(hrpPos.X - width / 2, hrpPos.Y - height / 2)
+                            esp.Box.Color = Options.BoxColor.Value
+                            esp.Box.Visible = true
+                        end
+                    else
+                        esp.Box.Visible = false
+                    end
+
+                    if Toggles.SkeletonESP.Value then
+                        local isR15 = character:FindFirstChild("UpperTorso") ~= nil
+                        local boneList = isR15 and R15Bones or R6Bones
+
+                        for index, bonePair in ipairs(boneList) do
+                            local partA = character:FindFirstChild(bonePair[1])
+                            local partB = character:FindFirstChild(bonePair[2])
+                            local line = esp.Skeleton[index]
+
+                            if partA and partB and line then
+                                local posA, visA = Camera:WorldToViewportPoint(partA.Position)
+                                local posB, visB = Camera:WorldToViewportPoint(partB.Position)
+
+                                if visA and visB then
+                                    line.From = Vector2.new(posA.X, posA.Y)
+                                    line.To = Vector2.new(posB.X, posB.Y)
+                                    line.Color = Options.SkeletonColor.Value
+                                    line.Visible = true
+                                else
+                                    line.Visible = false
+                                end
+                            elseif line then line.Visible = false end
+                        end
+                    else
+                        for _, line in ipairs(esp.Skeleton) do line.Visible = false end
+                    end
+                else
+                    esp.Box.Visible = false
+                    for _, line in ipairs(esp.Skeleton) do line.Visible = false end
+                end
+            else
+                esp.Box.Visible = false
+                for _, line in ipairs(esp.Skeleton) do line.Visible = false end
+            end
+        end
+    end
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+    if ESPCache[player] then
+        removeESPObjects(ESPCache[player])
+        ESPCache[player] = nil
+    end
+end)
+
+ThemeManager:SetLibrary(Library)
+ThemeManager:ApplyToTab(Tabs.Settings)
+
+Library:Notify("Solvix Suite cargado. Silent Aim auto-reconectado.")
